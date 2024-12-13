@@ -2,6 +2,7 @@
 import socket
 import sys
 import os
+import random
 from Crypto import aes_decrypt, keys
 
 # File directory
@@ -19,13 +20,10 @@ EAVESDROPPING_THRESHOLD = 0.25  # Minimum fraction of crumbs successfully decode
 # Convert keys from hexadecimal to byte values
 keys = {key: bytes.fromhex(format(value, 'x')) for key, value in keys.items()}
 
-# Report progress if a milestone is reached
-def report_progress(processed, total, last_marker, increment=10):
-    current_progress = (processed / total) * 100
-    if current_progress >= last_marker + increment:
-        print(f"[INFO] Progress: {current_progress:.0f}% completed.")
-        return current_progress
-    return last_marker
+# Report progress
+def report_success_rate(successful, total):
+    success_rate = (successful / total) * 100
+    print(f"[INFO] Decryption Success Rate: {success_rate:.2f}% ({successful}/{total})")
 
 # Recompose byte from crumbs
 def recompose_byte(crumbs):
@@ -61,74 +59,71 @@ def tcp_client():
             client_socket.connect((SERVER_HOST, SERVER_PORT))
             print(f"[INFO] Connected to {SERVER_HOST}:{SERVER_PORT}")
 
-            # Print total number of packets
+            # Receive total number of crumbs
             total_packets = int(client_socket.recv(BUFFER_LIMIT).decode('utf-8'))
             print(f"[INFO] Total packets to process: {total_packets}")
             client_socket.sendall(b"READY")
 
-            # Track progress and maintain lists
-            crumbs = [None] * total_packets  # List to hold decoded crumbs
-            attempted_keys = [[] for _ in range(total_packets)]  # List of lists for attempted keys per crumb
-            processed_packets = 0
-            last_progress_marker = 0
-            previous_progress = 0
+            # Initialize tracking structures
+            crumbs = [None] * total_packets  # List to hold successfully decrypted crumb key IDs
+            attempted_keys = {i: set() for i in range(total_packets)}  # Track keys used for each crumb
+            all_keys = list(keys.keys())  # Available key IDs
 
-            while True:
-                encrypted_data = client_socket.recv(BUFFER_LIMIT)
-                if not encrypted_data:
-                    print("[INFO] Server closed the connection. Exiting.")
-                    break
-                if encrypted_data == b"END":
-                    print(f"[INFO] All {total_packets} packets received.")
-                    break
-
-                # Process crumbs that haven't been decoded
-                crumb_index = processed_packets
-
-                if crumbs[crumb_index] is not None:
-                    # Skip if already decoded
-                    acknowledge_packet(client_socket, crumb_index)
-                    continue
-
-                decrypted_message = None
-                selected_key = None
-
-                # Attempt decryption using a random untried key
-                for key_id, key in keys.items():
-                    if key_id not in attempted_keys[crumb_index]:
-                        try:
-                            decrypted_message = aes_decrypt(encrypted_data, key)
-                            if decrypted_message == DECRYPTED_STRING:
-                                selected_key = key_id
-                                break
-                        except ValueError:
-                            attempted_keys[crumb_index].append(key_id)
-
-                # If successfully decrypted, mark crumb and acknowledge
-                if decrypted_message == DECRYPTED_STRING:
-                    crumbs[crumb_index] = selected_key  # Save the corresponding key ID
-                    processed_packets += 1
-                    acknowledge_packet(client_socket, crumb_index)
-                    last_progress_marker = report_progress(processed_packets, total_packets, last_progress_marker)
-                else:
-                    # If no key works, notify server with NACK
-                    client_socket.sendall(b"NACK")
-                    if DEBUG:
-                        print(f"[DEBUG] Decryption failed for crumb {crumb_index}. Keys tried: {attempted_keys[crumb_index]}")
-
-                # Check for eavesdropping after every full file transmission
-                if crumb_index + 1 == total_packets:
-                    current_progress = processed_packets / total_packets
-                    if current_progress - previous_progress < EAVESDROPPING_THRESHOLD:
-                        print("[ALERT] Potential eavesdropping detected! Terminating connection.")
-                        client_socket.close()
+            # Receive crumbs in four cycles
+            for cycle in range(1, 5):
+                print(f"\n[INFO] Starting decryption cycle {cycle}.")
+                for crumb_index in range(total_packets):
+                    encrypted_data = client_socket.recv(BUFFER_LIMIT)
+                    if not encrypted_data:
+                        print("[INFO] Server closed the connection. Exiting.")
                         return
-                    previous_progress = current_progress
+                    if encrypted_data == b"END":
+                        print("[INFO] All transmission cycles completed.")
+                        break
+
+                    # Skip crumbs already successfully decrypted
+                    if crumbs[crumb_index] is not None:
+                        acknowledge_packet(client_socket, crumb_index)
+                        continue
+
+                    # Find an unused key for this crumb
+                    unused_keys = [k for k in all_keys if k not in attempted_keys[crumb_index]]
+                    if not unused_keys:
+                        # If no keys remain, skip this crumb
+                        print(f"[WARNING] All keys exhausted for crumb {crumb_index}.")
+                        acknowledge_packet(client_socket, crumb_index)
+                        continue
+
+                    # Attempt decryption with an unused key
+                    next_key_id = random.choice(unused_keys)
+                    attempted_keys[crumb_index].add(next_key_id)
+                    next_key = keys[next_key_id]
+
+                    try:
+                        decrypted_message = aes_decrypt(encrypted_data, next_key)
+                    except ValueError:
+                        decrypted_message = None
+
+                    if decrypted_message == DECRYPTED_STRING:
+                        crumbs[crumb_index] = next_key_id
+
+                    # Acknowledge receipt of the crumb
+                    acknowledge_packet(client_socket, crumb_index)
+
+                # Report progress after each cycle
+                successful_decryptions = sum(1 for crumb in crumbs if crumb is not None)
+                remaining = total_packets - successful_decryptions
+                progress_percentage = (successful_decryptions / total_packets) * 100
+                print(f"[INFO] Cycle {cycle} complete: {progress_percentage:.2f}% decrypted "
+                      f"({successful_decryptions}/{total_packets}). {remaining} crumbs remaining.")
+
+            # Report final success rate
+            successful_decryptions = sum(1 for crumb in crumbs if crumb is not None)
+            report_success_rate(successful_decryptions, total_packets)
 
             # Recompose crumbs and save to file
             write_to_file(crumbs, "output_file.bin")
 
-    # Error handling
     except (socket.timeout, ConnectionError) as e:
         print(f"[ERROR] Network error: {e}")
     except Exception as e:
