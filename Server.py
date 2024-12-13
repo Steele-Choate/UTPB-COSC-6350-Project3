@@ -28,6 +28,7 @@ def prepare_packet(data, crumb):
     return aes_encrypt(data, encryption_key)
 
 # Function to handle client connection
+# Function to handle client connection
 def handle_client(conn, addr):
     conn.settimeout(TIMEOUT)
     print(f"[INFO] Connection from {addr} established.")
@@ -36,55 +37,41 @@ def handle_client(conn, addr):
         with open(file_path, "rb") as file:
             crumbs = [crumb for byte in file.read() for crumb in decompose_byte(byte)]
 
-        # Print total number of crumbs to send and notifies the client
         total_crumbs = len(crumbs)
         print(f"[INFO] Preparing to send {total_crumbs} crumbs to {addr}.")
         conn.sendall(str(total_crumbs).encode())
 
-        # Close the server if client is not ready
         client_ready = conn.recv(1024).decode('utf-8')
         if client_ready != "READY":
             print(f"[ERROR] Client {addr} is not ready. Closing connection.")
             return
 
-        # Track when to print updates on decryption progress
-        progress_milestone = 0
+        # Transmit crumbs in four cycles
+        for cycle in range(1, 5):
+            print(f"[INFO] Starting transmission cycle {cycle}.")
+            for crumb_index, crumb in enumerate(crumbs):
+                encrypted_packet = prepare_packet(ENCRYPTED_STRING, crumb)
+                if not encrypted_packet:
+                    continue
 
-        # Transmit crumbs to the client
-        for crumb_index, crumb in enumerate(crumbs):
-            encrypted_packet = prepare_packet(ENCRYPTED_STRING, crumb)
-            if not encrypted_packet:
-                continue
-
-            # Track acknowledgements from the server
-            ack_received = False
-            while not ack_received:
                 conn.sendall(encrypted_packet)
                 try:
                     response = conn.recv(1024).decode('utf-8')
-                    # Track percentage based on number of crumbs acknowledged
-                    if response == f"ACK:{crumb_index}":
-                        progress_percentage = ((crumb_index + 1) / total_crumbs) * 100
-                        if progress_percentage >= progress_milestone + 10:
-                            progress_milestone += 10
-                            print(f"[INFO] Transmission progress: {progress_milestone}% completed.")
-                        ack_received = True
-                    # Track unacknowledged crumbs
-                    elif response == "NACK":
-                        print(f"[WARNING] Crumb {crumb_index} rejected by client. Retrying...")
+                    if response.startswith("ACK"):
+                        pass  # ACK received, proceed
                 except socket.timeout:
-                    print(f"[WARNING] Timeout while awaiting acknowledgment for crumb {crumb_index}. Retrying...")
+                    print(f"[WARNING] Timeout while awaiting response for crumb {crumb_index} in cycle {cycle}.")
 
-        # End signal
+            print(f"[INFO] Transmission cycle {cycle} complete.")
+
+        # Send end signal
         conn.sendall(b"END")
-        print(f"[INFO] Successfully transmitted all crumbs to {addr}.")
+        print(f"[INFO] All cycles completed. Connection with {addr} closed.")
 
-    # Error handling
     except Exception as error:
         print(f"[ERROR] Communication error with {addr}: {error}")
     finally:
         conn.close()
-        print(f"[INFO] Connection with {addr} closed.")
 
 # Main server function
 def start_server():
